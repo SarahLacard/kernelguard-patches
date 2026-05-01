@@ -2853,6 +2853,8 @@ def detect_thread_injection(code: str | SubmissionFacts) -> list[dict]:
     mp_aliases: set[str] = {"multiprocessing"}
     futures_aliases: set[str] = set()
     asyncio_aliases: set[str] = {"asyncio"}
+    subprocess_aliases: set[str] = {"subprocess"}
+    os_aliases: set[str] = {"os"}
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -2866,6 +2868,10 @@ def detect_thread_injection(code: str | SubmissionFacts) -> list[dict]:
                     futures_aliases.add(name)
                 elif alias.name == "asyncio":
                     asyncio_aliases.add(name)
+                elif alias.name == "subprocess":
+                    subprocess_aliases.add(name)
+                elif alias.name == "os":
+                    os_aliases.add(name)
         elif isinstance(node, ast.ImportFrom):
             if node.module == "threading":
                 for alias in node.names:
@@ -2912,6 +2918,22 @@ def detect_thread_injection(code: str | SubmissionFacts) -> list[dict]:
                     "pattern": "THREAD_INJECTION",
                     "severity": "high",
                     "evidence": f"concurrent.futures.{node.func.attr}() — executor pool offloads compute",
+                })
+            elif (isinstance(node.func.value, ast.Name)
+                  and node.func.value.id in subprocess_aliases
+                  and node.func.attr in ("Popen", "run", "call", "check_call", "check_output")):
+                matches.append({
+                    "pattern": "THREAD_INJECTION",
+                    "severity": "high",
+                    "evidence": f"subprocess.{node.func.attr}() — background process offloads compute",
+                })
+            elif (isinstance(node.func.value, ast.Name)
+                  and node.func.value.id in os_aliases
+                  and node.func.attr in ("system", "popen", "fork", "spawn")):
+                matches.append({
+                    "pattern": "THREAD_INJECTION",
+                    "severity": "high",
+                    "evidence": f"os.{node.func.attr}() — background process offloads compute",
                 })
             elif (isinstance(node.func.value, ast.Name) and node.func.attr in ("run_in_executor", "ensure_future", "create_task", "gather")
                   and node.func.value.id in asyncio_aliases):
@@ -3436,6 +3458,26 @@ def detect_functools_cache_replay(code: str | SubmissionFacts) -> list[dict]:
         "evidence": f"{entrypoint_name} uses functools.lru_cache/cache decorator — transparent result caching evades all replay detectors",
     }]
 
+
+RE_SYS_SETTRACE = re.compile(r'sys\.settrace\s*\(')
+RE_SYS_SETPROFILE = re.compile(r'sys\.setprofile\s*\(')
+
+def detect_sys_trace_hook(code: str | SubmissionFacts) -> list[dict]:
+    facts = ensure_submission_facts(code)
+    raw = facts.raw_code
+    if RE_SYS_SETTRACE.search(raw):
+        return [{
+            "pattern": "DYNAMIC_EXECUTION",
+            "severity": "high",
+            "evidence": "sys.settrace() — debugger hook can inject arbitrary code execution per-line",
+        }]
+    if RE_SYS_SETPROFILE.search(raw):
+        return [{
+            "pattern": "DYNAMIC_EXECUTION",
+            "severity": "high",
+            "evidence": "sys.setprofile() — debugger hook can inject arbitrary code execution",
+        }]
+    return []
 
 # ---------------------------------------------------------------------------
 # Score anomaly detection
@@ -4238,6 +4280,7 @@ CODE_DETECTORS = [
     detect_hash_cache_replay,
     detect_eq_none_sentinel_replay,
     detect_getattr_data_ptr_replay,
+    detect_sys_trace_hook,
 ]
 
 BASE_DETECTOR_SPECS = [
@@ -4284,6 +4327,7 @@ BASE_DETECTOR_SPECS = [
     ("hash_cache_replay", detect_hash_cache_replay),
     ("eq_none_sentinel_replay", detect_eq_none_sentinel_replay),
     ("getattr_data_ptr_replay", detect_getattr_data_ptr_replay),
+    ("sys_trace_hook", detect_sys_trace_hook),
 ]
 
 VALID_RULE_OUTCOMES = {AUTO_FILTER, SUSPICIOUS_ONLY, TELEMETRY_ONLY}
